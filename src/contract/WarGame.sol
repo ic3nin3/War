@@ -1,4 +1,6 @@
-// 0x06A9e7BAD35a8aC2F04Bdc2858039a96F6A8bC30
+// test: 0xcC9De99b32750a0550380cb8495588ca2f48d533
+// previous: 0x20c375C04e22E600A2BD4Bb9c4499483942Fa7C7
+// latest: 0x20F173DF4580e900E39b0Dc442e0c54e7E133066
 pragma solidity ^0.8.9;
 import "@api3/airnode-protocol/contracts/rrp/requesters/RrpRequesterV0.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -15,10 +17,6 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     using SafeMath for uint256;
 
     uint256 public totalPlays;
-    uint256 public totalWins;
-    uint256 public totalLosses;
-    uint256 public totalBurnt;
-    uint256 public totalWon;
 
     /******************/
 
@@ -40,11 +38,12 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
 
     uint256 public poolIndex;
 
-    address public highscore;
+    uint256 public highscore;
+    address public highscoreHolder;
 
     address public airnode;
     bytes32 public endpointIdUint256;
-    address public sponsorWallet;    
+    address public sponsorWallet;
 
     uint256 public qfee = 50000000000000;
 
@@ -56,7 +55,8 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         uint256 myCard,
         uint256 theirCard,
         bool won,
-        uint256 amount
+        uint256 winAmount,
+        uint256 oppWinAmount
     );
 
     event EnteredPool(address indexed player);
@@ -68,10 +68,32 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         uint256 response
     );
 
+    bool gameActive;
+
+    address botContract;
+
     constructor(address _airnodeRrp, address _warTokenAddress)
         RrpRequesterV0(_airnodeRrp)
     {
         warToken = WarToken(_warTokenAddress);
+    }
+
+    modifier onlyOwnerBot() {
+        require(
+            (msg.sender ==owner()) || (msg.sender == botContract),
+            "Only Owner or Bot"
+        );
+        _;
+    }
+
+    function setBot(address _botContract) public onlyOwner {
+        botContract = _botContract;
+    }
+
+    function setQfee(uint256 _qfee) public onlyOwner {
+        require(_qfee <= 150000000000000, "Dont set fee too high");
+        require(_qfee >= 50000000000000, "Dont set fee too low");
+        qfee = _qfee;
     }
 
     function setRequestParameters(
@@ -81,7 +103,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     ) external onlyOwner {
         airnode = _airnode;
         endpointIdUint256 = _endpointIdUint256;
-        sponsorWallet = _sponsorWallet;        
+        sponsorWallet = _sponsorWallet;
     }
 
     function makeRequestUint256(address userAddress) internal {
@@ -111,33 +133,35 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         emit ReceivedUint256(requestUser[requestId], requestId, qrngUint256);
     }
 
-    function enterPool(uint256 _amount) 
-    payable 
-    public {
-        require(
-            !inGame[msg.sender],
-            "Can only enter one pool at a time"
-        );
+    function enterPool(uint256 _amount) public payable {
+        require(!inGame[msg.sender], "Can only enter one pool at a time");
         require(_amount > 0, "Must include a bet amount");
-        require(msg.value >= qfee, "Must small gas fee for the random number generator");
-        //address payable sendAddress = payable(sponsorWallet);
-        
-        ++poolIndex;        
-        
+        require(
+            msg.value >= qfee,
+            "Must small gas fee for the random number generator"
+        );
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        //address payable sendAddress = payable(sponsorWallet);        
         payable(sponsorWallet).transfer(qfee);
         userPool[msg.sender] = true;
         inGame[msg.sender] = true;
-        userIndex[poolIndex] = msg.sender;
+        userIndex[poolIndex+1] = msg.sender;
         makeRequestUint256(msg.sender);
-        betsize[msg.sender] = _amount;        
+        betsize[msg.sender] = _amount;
 
-        warToken.gameBurn(msg.sender, _amount);
+        warToken.gameBurn(msg.sender, _amount);        
         emit bet(msg.sender, _amount);
         emit EnteredPool(msg.sender);
+        ++poolIndex;
     }
 
     function leavePool(address user) internal {
         require(userPool[user], "Not in any pool");
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
         // Find the index of the user in userIndex and delete it
         uint256 userIndexToDelete;
         for (uint256 i = 1; i <= poolIndex; i++) {
@@ -161,7 +185,48 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         --poolIndex;
     }
 
+    function ForceLeavePool() public {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!userPool[msg.sender]) {
+            revert("Cannot leave Pool if you arent in the pool");
+        }
+        if (userToOpponent[msg.sender] == address(0)) {
+            warToken.gameMint(msg.sender, betsize[msg.sender]);
+        }
+        delete randomNumber[userId[msg.sender]];
+        delete requestUser[userId[msg.sender]];
+        delete betsize[msg.sender];
+        delete userId[msg.sender];
+        delete inGame[msg.sender];
+        leavePool(msg.sender);
+    }
+
+    function OpponentIssue() public {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (card[msg.sender] != 0 && userToOpponent[msg.sender] != address(0)) {
+            revert("Opponent is selected. wait for reveal");
+        }
+        if (!inGame[msg.sender]) {
+            revert("Must be in game");
+        }
+        warToken.gameMint(msg.sender, betsize[msg.sender]);
+        delete randomNumber[userId[msg.sender]];
+        delete requestUser[userId[msg.sender]];
+        delete betsize[msg.sender];
+        delete userId[msg.sender];
+        delete card[msg.sender];
+        delete drawTime[msg.sender];
+        delete inGame[msg.sender];
+    }
+
     function Draw() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
         require(
             poolIndex >= 2 || opponentToUser[msg.sender] != address(0),
             "Pool is low. wait for more players to enter"
@@ -178,36 +243,50 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
 
         bytes32 requestId = userId[msg.sender];
         uint256 secretnum = (randomNumber[requestId] % 12) + 1;
-        uint256 opponent;
+        uint256 opponentNum;
+        address opponent;
         if (opponentToUser[msg.sender] == address(0)) {
-            opponent = (randomNumber[requestId] % (poolIndex));
-            if (userIndex[opponent] == msg.sender) {
-                if (opponent > (poolIndex)) {
-                    opponent--;
+            opponentNum = (randomNumber[requestId] % (poolIndex-1)+1);
+            opponent = userIndex[opponentNum];            
+            if (userIndex[opponentNum] == msg.sender) {
+                if (opponentNum >= (poolIndex)) {
+                    --opponentNum;
+                    if (opponentNum == 0) {
+                        revert(
+                            "Pool has emptied while you were drawing. please try to draw again"
+                        );
+                    }
                 } else {
-                    opponent++;
+                    ++opponentNum;
                 }
             }
-            userToOpponent[msg.sender] = userIndex[opponent];
-            opponentToUser[userIndex[opponent]] = msg.sender;
-            userToOpponent[userIndex[opponent]] = msg.sender;
-            opponentToUser[msg.sender] = userIndex[opponent];
+            opponent = userIndex[opponentNum];            
+            userToOpponent[msg.sender] = opponent;
+            opponentToUser[opponent] = msg.sender;
+            userToOpponent[opponent] = msg.sender;
+            opponentToUser[msg.sender] = opponent;
+        }
+        else
+        {
+            opponent = opponentToUser[msg.sender];
         }
 
         card[msg.sender] = secretnum;
         drawTime[msg.sender] = block.timestamp;
         delete randomNumber[requestId];
         delete requestUser[requestId];
-        if (userPool[msg.sender]) {
-            delete userIndex[opponent];
-            leavePool(msg.sender);
-            if (userPool[userToOpponent[msg.sender]]) {
-                leavePool(userToOpponent[msg.sender]);
-            }
+        if (userPool[msg.sender]) {            
+            leavePool(msg.sender);            
+        }
+        if (userPool[userToOpponent[msg.sender]]) {
+            leavePool(userToOpponent[msg.sender]);
         }
     }
 
     function Reveal() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
         require(
             card[msg.sender] != 0,
             "Card has not been assigned, draw your card."
@@ -221,28 +300,64 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
 
         uint256 payoutWin;
         uint256 loseDelta;
-        uint256 winDelta;
+        uint256 winDelta;        
+        uint256 emitWin;
+        uint256 emitLose;
         if (userBet >= opponentBet) {
             payoutWin = userBet + opponentBet;
-            loseDelta = userBet - opponentBet;
+            loseDelta = userBet - opponentBet;  
+            emitLose = opponentBet;          
         } else {
             payoutWin = userBet + userBet;
-            winDelta = userBet = opponentBet;
+            winDelta = opponentBet - userBet;
+            emitLose = userBet;
         }
-        if (myCard > theirCard) {
-            emit win(msg.sender, myCard, theirCard, true, payoutWin);
+        if (myCard > theirCard) {            
+            if (payoutWin > highscore) {
+                highscore = payoutWin;
+                highscoreHolder = msg.sender;
+            }
+            if (payoutWin > userHighscore[msg.sender]) {
+                userHighscore[msg.sender] = payoutWin;
+            }
+            emitWin = (payoutWin - userBet);
+            
+            emit win(msg.sender, myCard, theirCard, true, emitWin, emitLose);
             warToken.gameMint(msg.sender, payoutWin);
             warToken.gameMint(opponent, winDelta);
         } else if (myCard == theirCard) {
-            emit win(msg.sender, myCard, theirCard, false, userBet);
+            emit win(
+                msg.sender,
+                myCard,
+                theirCard,
+                false,
+                0,
+                0
+            );
             warToken.gameMint(msg.sender, userBet);
             warToken.gameMint(opponent, opponentBet);
         } else {
-            emit win(msg.sender, myCard, theirCard, false, loseDelta);
             warToken.gameMint(msg.sender, loseDelta);
-            warToken.gameMint(opponent, (opponentBet + userBet) - loseDelta);
+            uint256 payopponent = (opponentBet + userBet) - loseDelta;
+            warToken.gameMint(opponent, payopponent);
+            emitWin = (payopponent - opponentBet);
+            emit win(
+                msg.sender,
+                myCard,
+                theirCard,
+                false,
+                emitLose,
+                emitWin
+            );
+            if (payopponent > highscore) {
+                highscore = payopponent;
+                highscoreHolder = opponent;
+            }
+            if (payopponent > userHighscore[opponent]) {
+                userHighscore[opponent] = payopponent;
+            }
         }
-
+        ++totalPlays;
         delete userToOpponent[msg.sender];
         delete opponentToUser[msg.sender];
         delete userToOpponent[opponent];
@@ -258,6 +373,9 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     }
 
     function ForceWin() public {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
         if (card[msg.sender] == 0) {
             revert("Must have selected a card");
         }
@@ -284,47 +402,39 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         delete betsize[opponent];
         delete drawTime[msg.sender];
         delete drawTime[opponent];
-    }
-
-    function ForceReveal(address user, address opponent) public onlyOwner {}
-
-    function ForceLeavePool() public {
-        if (card[msg.sender] != 0 || userToOpponent[msg.sender] != address(0)) {
-            revert("Cannot leave Pool after selecting a card unless opponent wasnt assigned");
-        }
-        if(userToOpponent[msg.sender] == address(0) && card[msg.sender] == 0 ){
-            warToken.gameMint(msg.sender,betsize[msg.sender]);
-        }     
-        delete randomNumber[userId[msg.sender]];
-        delete requestUser[userId[msg.sender]];
-        delete betsize[msg.sender];
-        delete userId[msg.sender];
         delete inGame[msg.sender];
-        leavePool(msg.sender);
     }
 
-    function fixZeroIndex() 
-    public
-    onlyOwner {                
+    function ChangeStatus(bool _newStatus) public onlyOwnerBot {
+        gameActive = _newStatus;
+    }
+
+    function fixGameIndex() external onlyOwnerBot {
+        address[] memory nonZeroIndices = new address[](poolIndex + 1);
+        uint256 count = 0;
         uint256 userIndexToDelete;
-        if(userIndex[0] != address(0))
-        {
-            userIndexToDelete = 0;
-        }
 
-        // Shift all the elements after the deleted index to the left by one position
-        for (uint256 i = 1; i <= poolIndex+1; i++) {
-            if(userIndex[i+1] == address(0))
-            {
-                poolIndex = i;
-                break;
+        // Collect all the non-zero indices from userIndex
+        for (uint256 i = 1; i <= poolIndex; i++) {
+            if (userIndex[i] != address(0)) {
+                nonZeroIndices[count] = userIndex[i];
+                count++;
             }
-            userIndex[i] = userIndex[i - 1];
-            
         }
 
-        // Delete the last element of userIndex
-        delete userIndex[userIndexToDelete];        
+        // Update userIndex with the non-zero indices and adjust poolIndex accordingly
+        if (count > 0) {
+            for (uint256 i = 0; i < count; i++) {
+                userIndex[i + 1] = nonZeroIndices[i];
+            }
+            poolIndex = count;
+        } else {
+            poolIndex = 0;
+        }
 
+        // Delete any remaining elements in userIndex
+        for (uint256 i = count + 1; i <= poolIndex; i++) {
+            delete userIndex[i];
+        }
     }
 }

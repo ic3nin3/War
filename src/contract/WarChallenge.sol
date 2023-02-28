@@ -11,22 +11,12 @@ interface WarToken {
     function gameBurn(address _to, uint256 _amount) external;
 }
 
-contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
+contract WARCHALLENGE is Ownable, ReentrancyGuard, RrpRequesterV0 {
     using SafeMath for uint256;
 
     uint256 public totalPlays;
-    uint256 public totalWins;
-    uint256 public totalLosses;
-    uint256 public totalBurnt;
-    uint256 public totalWon;
-
     /******************/
-
-    mapping(address => bytes32) public userId;
-    mapping(bytes32 => address) public requestUser;
-    mapping(bytes32 => uint256) public randomNumber;
-    mapping(address => uint256) public betsize;
-    mapping(address => uint256) public userHighscore;    
+        
 
     mapping(address => bool) public inGame;
 
@@ -91,12 +81,12 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         external
         onlyAirnodeRrp
     {
-        require(requestUser[requestId] != address(0), "Request ID not known");
+        require(requestReservedUser[requestId] != address(0), "Request ID not known");
         uint256 qrngUint256 = abi.decode(data, (uint256));
         // Do what you want with `qrngUint256` here...
-        randomNumber[requestId] = qrngUint256;
+        randomReservedNumber[requestId] = qrngUint256;
 
-        emit ReceivedUint256(requestUser[requestId], requestId, qrngUint256);
+        emit ReceivedUint256(requestReservedUser[requestId], requestId, qrngUint256);
     }
 
     function makeReservedRequestUint256(address userAddress) internal {
@@ -114,16 +104,21 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         emit RequestedUint256(requestId);
     }
 
-    function enterReservedPool(address opponent, uint256 _amount) public {
+    function enterChallenge(address opponent, uint256 _amount) public {
         require(
             !inGame[msg.sender],
-            "Can only enter one pool at a time"
+            "Can only open one challenge at a time"
         );
         require(_amount > 0, "Must include a bet amount");
         require(
             userReservedToOpponent[msg.sender] == address(0),
             "Can only open one challenge at a time"
         );
+        if(opponentReservedToUser[msg.sender] != address(0))
+        {            
+            userReservedToOpponent[msg.sender] = opponent;
+        opponentReservedToUser[opponent] = msg.sender;    
+        }
         address payable sendAddress = payable(sponsorWallet);
         sendAddress.transfer(qfee);
         userReservedPool[msg.sender] = true;
@@ -138,14 +133,14 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         emit bet(msg.sender, _amount);
     }
 
-    function leaveReservedPool() public {
+    function leaveReserved() public {
         require(
             userReservedPool[msg.sender],
-            "Must be in the reserved pool to leave"
+            "You Must have an open challenge"
         );
         bytes32 requestId = userReservedId[msg.sender];
         require(
-            randomNumber[requestId] != 0,
+            randomReservedNumber[requestId] != 0,
             "Must wait for random number to generate to clean out variables"
         );
         address opponent = userReservedToOpponent[msg.sender];
@@ -160,36 +155,48 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         delete opponentReservedToUser[opponent];
         delete userReservedPool[msg.sender];
         delete userReservedId[msg.sender];
+        delete randomReservedNumber[requestId];
+        delete betReservedSize[msg.sender];
         delete requestReservedUser[requestId];
+        delete inGame[msg.sender];
     }
 
-    function DrawReserved() public nonReentrant {
+    function drawReserved() public nonReentrant {
         require(
             userReservedId[msg.sender] != bytes32(0),
             "User has no unrevealed numbers."
         );
         require(
-            (randomNumber[userReservedId[msg.sender]] != uint256(0)),
+            (randomReservedNumber[userReservedId[msg.sender]] != uint256(0)),
             "Random number not ready, try again."
         );
         require(
             cardReserved[msg.sender] == uint256(0),
             "Card has been assigned, reveal to view results"
         );
+        address opponent = userReservedToOpponent[msg.sender];
         require(
-            userReservedToOpponent[userReservedToOpponent[msg.sender]] !=
-                address(0),
+            userReservedToOpponent[opponent] != address(0),
             "Selected Player needs to enter the Reserved pool"
         );
 
         bytes32 requestId = userReservedId[msg.sender];
-        uint256 secretnum = (randomNumber[requestId] % 12) + 1;
-
+        uint256 secretnum = (randomReservedNumber[requestId] % 12) + 1;
+        drawTime[msg.sender] = block.timestamp;
         cardReserved[msg.sender] = secretnum;
 
-        delete randomNumber[requestId];
-        delete requestUser[requestId];
-        leaveReservedPool();
+        delete randomReservedNumber[requestId];        
+        delete userReservedPool[msg.sender];
+        delete requestReservedUser[requestId];
+        delete userReservedPool[msg.sender];
+        if(cardReserved[opponent] != 0)
+        {
+            delete userReservedToOpponent[msg.sender];
+            delete opponentReservedToUser[opponent];
+            delete userReservedToOpponent[opponent];
+            delete opponentReservedToUser[msg.sender];  
+            delete userReservedId[msg.sender];
+        }
     }
 
     function RevealReserved() public nonReentrant {
@@ -224,10 +231,11 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
             warToken.gameMint(opponent, opponentBet);
         } else {
             emit win(msg.sender, myCard, theirCard, false, delta);
+            uint256 payoutOpponent = (opponentBet + userBet) - delta;
             warToken.gameMint(msg.sender, delta);
-            warToken.gameMint(opponent, (opponentBet + userBet) - delta);
+            warToken.gameMint(opponent, payoutOpponent);
         }
-
+        ++totalPlays;
         delete userReservedToOpponent[msg.sender];
         delete opponentReservedToUser[msg.sender];
         delete userReservedToOpponent[opponent];
@@ -250,7 +258,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         if (cardReserved[opponent] != 0) {
             revert("Opponent has drawn a card");
         }
-        uint256 totalBet = betsize[msg.sender] + betsize[opponent];
+        uint256 totalBet = betReservedSize[msg.sender] + betReservedSize[opponent];
 
         warToken.gameMint(msg.sender, totalBet);
         delete userReservedPool[opponent];

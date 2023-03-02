@@ -6,11 +6,15 @@ import "@api3/airnode-protocol/contracts/rrp/requesters/RrpRequesterV0.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
+
 
 interface WarToken {
     function gameMint(address _to, uint256 _amount) external;
 
     function gameBurn(address _to, uint256 _amount) external;
+
+    function transfer(address _to, uint256 _amount) external returns (bool);
 }
 
 contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
@@ -38,6 +42,7 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
     address public airnode;
     bytes32 public endpointIdUint256;
     address public sponsorWallet;
+    address internal devAddress;
 
     uint256 public gridSize;
     uint256 public qfee = 100000000000000;  
@@ -87,8 +92,18 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
         _;
     }
 
-    function setBot(address _botContract) public onlyOwner {
+    function setBot(address _botContract) 
+    public 
+    onlyOwner 
+    {
         botContract = _botContract;
+    }
+
+    function setDev(address _dev)
+    public
+    onlyOwner
+    {
+        devAddress = _dev;
     }
 
     function setQfee(uint256 _qfee) public onlyOwner {
@@ -152,11 +167,17 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
         require((x < gridSize) && (x >= 0), "x value is out of bounds");
         require(((y < gridSize) && (y >= 0)), "y value is out of bounds");
         require(userId[msg.sender] == 0, "one bet at a time buddy!");
+        
         payable(sponsorWallet).transfer(qfee);
-        warToken.gameBurn(msg.sender, _amount);        
+        
+        uint256 devFee = SafeMath.div(_amount,50);
+        uint256 playerBet = _amount - devFee; 
+        warToken.transfer(devAddress, devFee);        
+        warToken.gameBurn(msg.sender, playerBet);
         makeRequestUint256(msg.sender);
         coord[msg.sender] = [x, y];
-        betsize[msg.sender] = ((_amount / computePayout(gridSize)) + _amount);
+
+        betsize[msg.sender] = playerBet;
         emit bet(msg.sender, _amount);
     }
 
@@ -170,7 +191,7 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
         bytes32 requestId = userId[msg.sender];
         uint256 secretnum = (randomNumber[requestId] % (((gridSize - 1) * (gridSize - 1))-1));
         uint256 userBet = betsize[msg.sender];
-        uint256 winAmount = computePayout(gridSize);
+        uint256 winAmount = SafeMath.div(userBet,computePayout(gridSize)) + userBet;        
 
         uint8[2] memory xy = coord[msg.sender];
         uint8 x = xy[0];

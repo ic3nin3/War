@@ -7,17 +7,16 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 
-
-interface WarToken {
+interface WarToken is IERC20 {
     function gameMint(address _to, uint256 _amount) external;
 
     function gameBurn(address _to, uint256 _amount) external;
-
-    function transfer(address _to, uint256 _amount) external returns (bool);
 }
 
-contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
+contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
     using SafeMath for uint256;
 
     uint256 public totalPlays;
@@ -29,9 +28,9 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
     mapping(bytes32 => uint256) public randomNumber;
     mapping(address => uint256) public betsize;
     mapping(address => uint8[2]) public coord;
-    // mapping(address => uint256) public userHighscore;    
+    // mapping(address => uint256) public userHighscore;
 
-    mapping(address => bool) public inGame;    
+    mapping(address => bool) public inGame;
     mapping(bytes32 => bool) public expectingRequestWithIdToBeFulfilled;
 
     uint256 public poolIndex;
@@ -45,10 +44,10 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
     address internal devAddress;
 
     uint256 public gridSize;
-    uint256 public qfee = 100000000000000;  
+    uint256 public qfee = 100000000000000;
 
-    uint256 public  totalWins;     
-    uint256 public totalWon;     
+    uint256 public totalWins;
+    uint256 public totalWon;
 
     uint256 totalLosses;
     uint256 totalLost;
@@ -62,10 +61,8 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
         uint256 x,
         uint256 y,
         bool won,
-        uint256 Amount        
-    );
-
-    event EnteredPool(address indexed player);
+        uint256 Amount
+    );    
 
     event RequestedUint256(bytes32 indexed requestId);
     event ReceivedUint256(
@@ -78,32 +75,41 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
 
     address botContract;
 
+    bytes32 public constant WITHDRAWER_ROLE = keccak256("WITHDRAWER_ROLE");
+
     constructor(address _airnodeRrp, address _warTokenAddress)
         RrpRequesterV0(_airnodeRrp)
     {
         warToken = WarToken(_warTokenAddress);
     }
 
+    function GetUserTokenBalance() public view returns (uint256) {
+        return warToken.balanceOf(msg.sender); // balancdOf function is already declared in ERC20 token function
+    }
+
+    function GetAllowance() public view returns (uint256) {
+        return warToken.allowance(msg.sender, address(this));
+    }    
+
+    function GetContractTokenBalance() public view onlyOwner returns (uint256) {
+        return warToken.balanceOf(address(this));
+    }
+
     modifier onlyOwnerBot() {
         require(
-            (msg.sender ==owner()) || (msg.sender == botContract),
+            (msg.sender == owner()) || (msg.sender == botContract),
             "Only Owner or Bot"
         );
         _;
     }
 
-    function setBot(address _botContract) 
-    public 
-    onlyOwner 
-    {
+    function setBot(address _botContract) public onlyOwner {
         botContract = _botContract;
     }
 
-    function setDev(address _dev)
-    public
-    onlyOwner
-    {
+    function setDev(address _dev) public onlyOwner {
         devAddress = _dev;
+        _setupRole(WITHDRAWER_ROLE, _dev);
     }
 
     function setQfee(uint256 _qfee) public onlyOwner {
@@ -161,45 +167,60 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
         uint256 _amount,
         uint8 x,
         uint8 y
-    ) public nonReentrant {
-        require(gridSize > 3, "GridSize needs to be greate then 3");        
-        require(_amount > 0, "Send at least 1 POP token");
+    ) public payable nonReentrant {
+        require(gridSize > 3, "GridSize needs to be greater then 3");
+        require(_amount > 0, "Send at least 1 War token");
         require((x < gridSize) && (x >= 0), "x value is out of bounds");
         require(((y < gridSize) && (y >= 0)), "y value is out of bounds");
-        require(userId[msg.sender] == 0, "one bet at a time buddy!");
+        require(
+            !inGame[msg.sender],
+            "Check the results of your last game first"
+        );
+        require(devAddress != address(0),"owner must set dev address");
+        require(_amount <= GetAllowance(),"owner must set dev address");
+
+        uint256 devFee = SafeMath.div(_amount, 50);
+        uint256 playerBet = _amount - devFee;
+
+        // Transfer 2% to front end dev
+        require(warToken.transferFrom(msg.sender, address(this), playerBet), "Token transfer failed");
+
         
+        // pay randomness sponser wallet to cover gas
         payable(sponsorWallet).transfer(qfee);
-        
-        uint256 devFee = SafeMath.div(_amount,50);
-        uint256 playerBet = _amount - devFee; 
-        warToken.transfer(devAddress, devFee);        
+
+        // burn remaining tokens
         warToken.gameBurn(msg.sender, playerBet);
         makeRequestUint256(msg.sender);
         coord[msg.sender] = [x, y];
-
+        inGame[msg.sender] = true;
         betsize[msg.sender] = playerBet;
         emit bet(msg.sender, _amount);
     }
 
     function Reveal() public nonReentrant {
         require(gridSize > 3, "gridMatrix has no values");
-        require(userId[msg.sender] != 0, "User has no unrevealed numbers.");
+        bytes32 requestId = userId[msg.sender];
+        require(requestId != 0, "User has no unrevealed numbers.");
         require(
-            (randomNumber[userId[msg.sender]] != uint256(0)),
+            (randomNumber[requestId] != uint256(0)),
             "Random number not ready, try again."
         );
-        bytes32 requestId = userId[msg.sender];
-        uint256 secretnum = (randomNumber[requestId] % (((gridSize - 1) * (gridSize - 1))-1));
+        require(inGame[msg.sender], "Launch a nuke to start bro.");
+        uint256 secretnum = (randomNumber[requestId] %
+            (((gridSize - 1) * (gridSize - 1)) - 1));
         uint256 userBet = betsize[msg.sender];
-        uint256 winAmount = SafeMath.div(userBet,computePayout(gridSize)) + userBet;        
+
+        uint256 winAmount = Math.mulDiv(userBet, computePayout(gridSize), 4) +
+            userBet;
 
         uint8[2] memory xy = coord[msg.sender];
         uint8 x = xy[0];
         uint8 y = xy[1];
         bool check = checkMatch(secretnum, x, y);
 
-        if (check) {            
-            warToken.gameMint(msg.sender, winAmount);  
+        if (check) {
+            warToken.gameMint(msg.sender, winAmount);
             ++totalWins;
             totalWon += winAmount;
             emit win(msg.sender, secretnum, x, y, true, winAmount);
@@ -214,35 +235,33 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
         delete betsize[msg.sender];
         delete userId[msg.sender];
         delete coord[msg.sender];
-        delete inGame[msg.sender];       
+        delete inGame[msg.sender];
     }
-    
+
+    // inactive but might add for future implementations
     function ChangeStatus(bool _newStatus) public onlyOwnerBot {
         gameActive = _newStatus;
     }
 
-    function leaveGame()
-    public
-    {           
-        if (!inGame[msg.sender])
-        {
+    function leaveGame() public {
+        if (!inGame[msg.sender]) {
             revert("Not in a game");
         }
-        bytes32 requestId = userId[msg.sender];   
+        bytes32 requestId = userId[msg.sender];
         delete requestUser[requestId];
-        delete randomNumber[requestId];        
-        delete userId[msg.sender];        
+        delete randomNumber[requestId];
+        delete userId[msg.sender];
         delete betsize[msg.sender];
         delete inGame[msg.sender];
+        delete coord[msg.sender];
     }
 
     function checkMatch(
         uint256 k,
         uint8 x,
         uint8 y
-    ) public view
-    returns (bool) {
-        uint8[8] memory solution = generateSolutions(gridSize,k);
+    ) public view returns (bool) {
+        uint8[8] memory solution = generateSolutions(gridSize, k);
         uint256 end = solution.length;
         for (uint256 i = 0; i < end; i += 2) {
             if (solution[i] == x && solution[i + 1] == y) {
@@ -266,9 +285,19 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0 {
     }
 
     function computePayout(uint256 n) public pure returns (uint256) {
-        uint256 safeOdds = (n - 1) * (n - 1);
-        return SafeMath.div(4, safeOdds);
+        uint256 safeOdds = SafeMath.mul(SafeMath.sub(n, 1), SafeMath.sub(n, 1));
+        return safeOdds;
     }
 
-}
+    function withdrawWar(address recipient, uint256 amount) public {
+        require(
+            hasRole(WITHDRAWER_ROLE, msg.sender),
+            "MyContract: must have withdrawer role to withdraw"
+        );
+        warToken.transfer(recipient, amount);
+    }
 
+    function withdraw(address _recipient) public payable onlyOwner {
+        payable(_recipient).transfer(address(this).balance);
+    }
+}

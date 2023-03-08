@@ -28,6 +28,13 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
     mapping(bytes32 => uint256) public randomNumber;
     mapping(address => uint256) public betsize;
     mapping(address => uint8[2]) public coord;
+
+    mapping(address => uint256) public userTotalBet;
+    mapping(address => uint256) public userTotalWon;
+    mapping(address => uint256) public userTotalLost;
+
+    uint256 public devFees;
+    uint256 public warFees;
     // mapping(address => uint256) public userHighscore;
 
     mapping(address => bool) public inGame;
@@ -76,6 +83,7 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
     address botContract;
 
     bytes32 public constant WITHDRAWER_ROLE = keccak256("WITHDRAWER_ROLE");
+    bytes32 public constant WAR_ROLE = keccak256("WAR_ROLE");
 
     constructor(address _airnodeRrp, address _warTokenAddress)
         RrpRequesterV0(_airnodeRrp)
@@ -105,6 +113,11 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
 
     function setBot(address _botContract) public onlyOwner {
         botContract = _botContract;
+    }
+
+    function removeDev(address _dev) public onlyOwner {
+        devAddress = _dev;
+        _setupRole(WITHDRAWER_ROLE, _dev);
     }
 
     function setDev(address _dev) public onlyOwner {
@@ -179,11 +192,14 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
         require(devAddress != address(0),"owner must set dev address");
         require(_amount <= GetAllowance(),"owner must set dev address");
 
-        uint256 devFee = SafeMath.div(_amount, 50);
-        uint256 playerBet = _amount - devFee;
+        uint256 tempDevFee = SafeMath.div(_amount, 100);
 
-        // Transfer 2% to front end dev
-        require(warToken.transferFrom(msg.sender, address(this), playerBet), "Token transfer failed");
+        devFees += SafeMath.div(tempDevFee,2);
+        warFees += SafeMath.div(tempDevFee,2);
+        uint256 playerBet = _amount - tempDevFee;
+
+        // Transfer 2% to front end dev 2% to war chest
+        require(warToken.transferFrom(msg.sender, address(this), tempDevFee), "Token transfer failed");
 
         
         // pay randomness sponser wallet to cover gas
@@ -206,10 +222,12 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
             (randomNumber[requestId] != uint256(0)),
             "Random number not ready, try again."
         );
-        require(inGame[msg.sender], "Launch a nuke to start bro.");
+        require(inGame[msg.sender], "Launch a nuke to start bro.");        
+
         uint256 secretnum = (randomNumber[requestId] %
             (((gridSize - 1) * (gridSize - 1)) - 1));
         uint256 userBet = betsize[msg.sender];
+        userTotalBet[msg.sender] += userBet;
 
         uint256 winAmount = Math.mulDiv(userBet, computePayout(gridSize), 4) +
             userBet;
@@ -223,19 +241,22 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
             warToken.gameMint(msg.sender, winAmount);
             ++totalWins;
             totalWon += winAmount;
+            userTotalWon[msg.sender] += (winAmount-userBet);
             emit win(msg.sender, secretnum, x, y, true, winAmount);
         } else {
             ++totalLosses;
             totalLost += userBet;
+            userTotalLost[msg.sender] += userBet;
             emit win(msg.sender, secretnum, x, y, false, userBet);
         }
         ++totalPlays;
+
+        delete inGame[msg.sender];
         delete randomNumber[requestId];
         delete requestUser[requestId];
         delete betsize[msg.sender];
         delete userId[msg.sender];
-        delete coord[msg.sender];
-        delete inGame[msg.sender];
+        delete coord[msg.sender];        
     }
 
     // inactive but might add for future implementations
@@ -244,15 +265,20 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
     }
 
     function leaveGame() public {
-        if (!inGame[msg.sender]) {
+        if (!inGame[msg.sender]) 
+        {
             revert("Not in a game");
-        }
+        }                
         bytes32 requestId = userId[msg.sender];
+        if(randomNumber[requestId] == uint256(0))
+        {
+            warToken.gameMint(msg.sender,betsize[msg.sender]);
+        }
+        delete inGame[msg.sender];
         delete requestUser[requestId];
         delete randomNumber[requestId];
         delete userId[msg.sender];
-        delete betsize[msg.sender];
-        delete inGame[msg.sender];
+        delete betsize[msg.sender];        
         delete coord[msg.sender];
     }
 
@@ -289,12 +315,22 @@ contract AERIAL is Ownable, ReentrancyGuard, RrpRequesterV0, AccessControl {
         return safeOdds;
     }
 
-    function withdrawWar(address recipient, uint256 amount) public {
+    function devWithdrawWar(address recipient) public {
         require(
             hasRole(WITHDRAWER_ROLE, msg.sender),
             "MyContract: must have withdrawer role to withdraw"
         );
-        warToken.transfer(recipient, amount);
+        warToken.transfer(recipient, devFees);
+        devFees = 0;
+    }
+
+    function warWithdrawWar(address _recipient) onlyOwner public {
+        require(
+            hasRole(WAR_ROLE, msg.sender),
+            "MyContract: must have withdrawer role to withdraw"
+        );
+        warToken.transfer(_recipient, warFees);
+        warFees = 0;
     }
 
     function withdraw(address _recipient) public payable onlyOwner {

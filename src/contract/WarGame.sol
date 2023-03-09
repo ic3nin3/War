@@ -1,6 +1,6 @@
 // test: 0xcC9De99b32750a0550380cb8495588ca2f48d533
-// previous: 0x20c375C04e22E600A2BD4Bb9c4499483942Fa7C7
-// latest: 0x20F173DF4580e900E39b0Dc442e0c54e7E133066
+// previous: 0x37Ae76D5c3AdB25790F64215062E512a9d2262b7
+// latest: 0xB383940282D6624b9e7F8e4e1AEFD78e27A987F6
 pragma solidity ^0.8.9;
 import "@api3/airnode-protocol/contracts/rrp/requesters/RrpRequesterV0.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -46,12 +46,13 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     address public sponsorWallet;
 
     uint256 public qfee = 50000000000000;
-
+    uint256 waitTime = 600; //1800;
     WarToken warToken;
 
     event bet(address indexed from, uint256 amount);
     event win(
-        address indexed from,
+        address indexed player,
+        address indexed opponent,
         uint256 myCard,
         uint256 theirCard,
         bool won,
@@ -133,7 +134,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         emit ReceivedUint256(requestUser[requestId], requestId, qrngUint256);
     }
 
-    function enterPool(uint256 _amount) public payable {
+    function enterPool(uint256 _amount) public payable nonReentrant {
         require(!inGame[msg.sender], "Can only enter one pool at a time");
         require(_amount > 0, "Must include a bet amount");
         require(
@@ -185,7 +186,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         --poolIndex;
     }
 
-    function ForceLeavePool() public {
+    function ForceLeavePool() public nonReentrant {
         if (!gameActive) {
             revert("Game has been temporarily Paused");
         }
@@ -203,7 +204,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         leavePool(msg.sender);
     }
 
-    function OpponentIssue() public {
+    function OpponentIssue() public nonReentrant {
         if (!gameActive) {
             revert("Game has been temporarily Paused");
         }
@@ -212,6 +213,9 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         }
         if (!inGame[msg.sender]) {
             revert("Must be in game");
+        }
+        if (userPool[msg.sender]) {
+            revert("Use Force Leave pool function to leave the pool");
         }
         warToken.gameMint(msg.sender, betsize[msg.sender]);
         delete randomNumber[userId[msg.sender]];
@@ -275,6 +279,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         drawTime[msg.sender] = block.timestamp;
         delete randomNumber[requestId];
         delete requestUser[requestId];
+        delete userId[msg.sender];
         if (userPool[msg.sender]) {            
             leavePool(msg.sender);            
         }
@@ -322,12 +327,13 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
             }
             emitWin = (payoutWin - userBet);
             
-            emit win(msg.sender, myCard, theirCard, true, emitWin, emitLose);
+            emit win(msg.sender, opponent, myCard, theirCard, true, emitWin, emitLose);
             warToken.gameMint(msg.sender, payoutWin);
             warToken.gameMint(opponent, winDelta);
         } else if (myCard == theirCard) {
             emit win(
                 msg.sender,
+                opponent,
                 myCard,
                 theirCard,
                 false,
@@ -343,6 +349,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
             emitWin = (payopponent - opponentBet);
             emit win(
                 msg.sender,
+                opponent,
                 myCard,
                 theirCard,
                 false,
@@ -357,7 +364,51 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
                 userHighscore[opponent] = payopponent;
             }
         }
-        ++totalPlays;
+        ++totalPlays;        
+        delete userToOpponent[msg.sender];
+        delete opponentToUser[msg.sender];
+        delete userToOpponent[opponent];
+        delete opponentToUser[opponent];
+        delete card[msg.sender];
+        delete card[opponent];
+        delete betsize[msg.sender];
+        delete betsize[opponent];
+        delete drawTime[msg.sender];
+        delete drawTime[opponent];
+        delete inGame[msg.sender];
+        delete inGame[opponent];
+        delete userPool[opponent];
+        delete userPool[msg.sender];
+    }
+
+    function ForceWin() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (waitTime==0) {
+            revert("Ask Dev to Set a Wait Time");
+        }
+        if (card[msg.sender] == 0 && !inGame[msg.sender]) {
+            revert("Must have selected a card");
+        }
+        uint256 lastCallTime = drawTime[msg.sender];
+        if (lastCallTime == 0 || block.timestamp < (lastCallTime + waitTime)) {
+            revert("Opponent has 30 minutes to draw a card");
+        }
+        address opponent = userToOpponent[msg.sender];
+        if (card[opponent] != 0) {
+            revert("Opponent has drawn a card");
+        }
+        uint256 totalBet = betsize[msg.sender] + betsize[opponent];
+        bytes32 oppRequestId = userId[opponent];
+
+        warToken.gameMint(msg.sender, totalBet);
+        delete randomNumber[oppRequestId];
+        delete requestUser[oppRequestId];
+        delete userId[msg.sender];
+        delete userId[opponent];
+        delete userPool[opponent];
+        delete userPool[msg.sender];
         delete userToOpponent[msg.sender];
         delete opponentToUser[msg.sender];
         delete userToOpponent[opponent];
@@ -372,41 +423,12 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         delete inGame[opponent];
     }
 
-    function ForceWin() public {
-        if (!gameActive) {
-            revert("Game has been temporarily Paused");
-        }
-        if (card[msg.sender] == 0) {
-            revert("Must have selected a card");
-        }
-        uint256 lastCallTime = drawTime[msg.sender];
-        if (lastCallTime == 0 || block.timestamp < lastCallTime + 1800) {
-            revert("Opponent has 30 minutes to draw a card");
-        }
-        address opponent = userToOpponent[msg.sender];
-        if (card[opponent] != 0) {
-            revert("Opponent has drawn a card");
-        }
-        uint256 totalBet = betsize[msg.sender] + betsize[opponent];
-
-        warToken.gameMint(msg.sender, totalBet);
-        delete userPool[opponent];
-        delete userPool[msg.sender];
-        delete userToOpponent[msg.sender];
-        delete opponentToUser[msg.sender];
-        delete userToOpponent[opponent];
-        delete opponentToUser[opponent];
-        delete card[msg.sender];
-        delete card[opponent];
-        delete betsize[msg.sender];
-        delete betsize[opponent];
-        delete drawTime[msg.sender];
-        delete drawTime[opponent];
-        delete inGame[msg.sender];
-    }
-
     function ChangeStatus(bool _newStatus) public onlyOwnerBot {
         gameActive = _newStatus;
+    }
+
+    function ChangeWinTime(uint256 _waitTime) public onlyOwner {
+        waitTime = _waitTime;
     }
 
     function fixGameIndex() external onlyOwnerBot {

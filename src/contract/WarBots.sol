@@ -1,6 +1,6 @@
 // test: 0xcC9De99b32750a0550380cb8495588ca2f48d533
 // previous: 0x20c375C04e22E600A2BD4Bb9c4499483942Fa7C7
-// latest: 0x20F173DF4580e900E39b0Dc442e0c54e7E133066
+// latest: 0xa1646B20BC827a02B92Cf0314Cea656665BDb571
 pragma solidity ^0.8.9;
 import "@api3/airnode-protocol/contracts/rrp/requesters/RrpRequesterV0.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -39,7 +39,7 @@ contract WARBOTS is Ownable, ReentrancyGuard, RrpRequesterV0 {
     address public sponsorWallet;
 
     uint256 public qfee = 100000000000000;                          
-
+// 180000000000000
     WarToken warToken;
 
     event bet(address indexed from, uint256 amount);
@@ -112,6 +112,11 @@ contract WARBOTS is Ownable, ReentrancyGuard, RrpRequesterV0 {
         expectingRequestWithIdToBeFulfilled[requestId] = true;
         userId[userAddress] = requestId;
         requestUser[requestId] = userAddress;
+        uint256[] memory tempZero;
+        tempZero = new uint256[](2);
+        tempZero[0] = uint256(0);
+        tempZero[1] = uint256(0);
+        randomNumberArray[requestId] = tempZero;
         emit RequestedUint256Array(requestId, size);
     }
 
@@ -134,7 +139,7 @@ contract WARBOTS is Ownable, ReentrancyGuard, RrpRequesterV0 {
         // Do what you want with `qrngUint256Array` here...
         emit ReceivedUint256Array(userAddress, requestId, qrngUint256Array);
     }    
-    function DrawCard(uint256 _amount) public payable {
+    function DrawCard(uint256 _amount) public payable nonReentrant {
         require(!inGame[msg.sender], "Can only enter one pool at a time");
         require(_amount > 0, "Must include a bet amount");
         require(
@@ -197,7 +202,8 @@ contract WARBOTS is Ownable, ReentrancyGuard, RrpRequesterV0 {
         }
         ++totalPlays;
         delete requestUser[requestId];
-        delete randomNumberArray[requestId];        
+        randomNumberArray[requestId][0] = uint256(0);
+        randomNumberArray[requestId][1] = uint256(0);
         delete userId[msg.sender];        
         delete betsize[msg.sender];
         delete inGame[msg.sender];
@@ -210,14 +216,23 @@ contract WARBOTS is Ownable, ReentrancyGuard, RrpRequesterV0 {
 
     function leaveGame()
     public
+    nonReentrant
     {           
         if (!inGame[msg.sender])
         {
             revert("Not in a game");
         }
         bytes32 requestId = userId[msg.sender];   
-        delete requestUser[requestId];
-        delete randomNumberArray[requestId];        
+        uint256 userBet = betsize[msg.sender];
+        if(userBet != uint256(0))
+        {
+            warToken.gameMint(msg.sender,betsize[msg.sender]);
+        }
+        
+
+        delete requestUser[requestId];        
+        randomNumberArray[requestId][0] = uint256(0);
+        randomNumberArray[requestId][1] = uint256(0);       
         delete userId[msg.sender];        
         delete betsize[msg.sender];
         delete inGame[msg.sender];       

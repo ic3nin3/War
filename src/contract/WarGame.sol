@@ -20,6 +20,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
 
     /******************/
 
+    /* Regular pool */
     mapping(address => bytes32) public userId;
     mapping(bytes32 => address) public requestUser;
     mapping(bytes32 => uint256) public randomNumber;
@@ -31,10 +32,23 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     mapping(address => address) public userToOpponent;
     mapping(address => address) public opponentToUser;
     mapping(address => uint256) public card;
-
+    mapping(address => uint256) public drawTime;
     mapping(address => bool) public inGame;
 
-    mapping(address => uint256) public drawTime;
+    /* 50 pool*/            
+    mapping(address => bool) public userFiftyPool;
+    mapping(uint256 => address) public userFiftyIndex;        
+    uint256 poolFiftyIndex;
+
+    /* 100 pool*/            
+    mapping(address => bool) public userHundredPool;
+    mapping(uint256 => address) public userHundredIndex;        
+    uint256 poolHundredIndex;
+
+    /* 500 pool*/            
+    mapping(address => bool) public userLargePool;
+    mapping(uint256 => address) public userLargeIndex;       
+    uint256 poolLargeIndex;
 
     uint256 public poolIndex;
 
@@ -61,6 +75,9 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     );
 
     event EnteredPool(address indexed player);
+    event EnteredFiftyPool(address indexed player);
+    event EnteredHundredPool(address indexed player);    
+    event EnteredLargePool(address indexed player);
 
     event RequestedUint256(bytes32 indexed requestId);
     event ReceivedUint256(
@@ -159,7 +176,7 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
     }
 
     function leavePool(address user) internal {
-        require(userPool[user], "Not in any pool");
+        require(userPool[user], "Not in general pool");
         if (!gameActive) {
             revert("Game has been temporarily Paused");
         }
@@ -202,29 +219,6 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         delete userId[msg.sender];
         delete inGame[msg.sender];
         leavePool(msg.sender);
-    }
-
-    function OpponentIssue() public nonReentrant {
-        if (!gameActive) {
-            revert("Game has been temporarily Paused");
-        }
-        if (card[msg.sender] != 0 && userToOpponent[msg.sender] != address(0)) {
-            revert("Opponent is selected. wait for reveal");
-        }
-        if (!inGame[msg.sender]) {
-            revert("Must be in game");
-        }
-        if (userPool[msg.sender]) {
-            revert("Use Force Leave pool function to leave the pool");
-        }
-        warToken.gameMint(msg.sender, betsize[msg.sender]);
-        delete randomNumber[userId[msg.sender]];
-        delete requestUser[userId[msg.sender]];
-        delete betsize[msg.sender];
-        delete userId[msg.sender];
-        delete card[msg.sender];
-        delete drawTime[msg.sender];
-        delete inGame[msg.sender];
     }
 
     function Draw() public nonReentrant {
@@ -286,6 +280,431 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         if (userPool[userToOpponent[msg.sender]]) {
             leavePool(userToOpponent[msg.sender]);
         }
+    }
+
+    function enterFiftyPool(uint256 _amount) public payable nonReentrant {
+        require(!inGame[msg.sender], "Can only enter one pool at a time");
+        require(_amount == 50000000000000000000, "Must bet 100 tokens");
+        require(
+            msg.value >= qfee,
+            "Must small gas fee for the random number generator"
+        );
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        //address payable sendAddress = payable(sponsorWallet);        
+        payable(sponsorWallet).transfer(qfee);
+        userFiftyPool[msg.sender] = true;
+        inGame[msg.sender] = true;
+        userFiftyIndex[poolFiftyIndex+1] = msg.sender;
+        makeRequestUint256(msg.sender);
+        betsize[msg.sender] = _amount;
+
+        warToken.gameBurn(msg.sender, _amount);     
+        emit bet(msg.sender, _amount);
+        emit EnteredPool(msg.sender);
+        ++poolFiftyIndex;
+    }
+
+    function leaveFiftyPool(address user) internal {
+        require(userFiftyPool[user], "Not in any pool");
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        // Find the index of the user in userIndex and delete it
+        uint256 userIndexToDelete;
+        for (uint256 i = 1; i <= poolFiftyIndex; i++) {
+            if (userFiftyIndex[i] == user) {
+                userIndexToDelete = i;
+                delete userFiftyIndex[i];
+                break;
+            }
+        }
+
+        // Shift all the elements after the deleted index to the left by one position
+        for (uint256 i = userIndexToDelete; i <= poolFiftyIndex; i++) {
+            userFiftyIndex[i] = userFiftyIndex[i + 1];
+        }
+
+        // Delete the last element of userIndex
+        delete userFiftyIndex[poolFiftyIndex];
+        // Delete the user from userPool
+        delete userFiftyPool[user];
+        // Decrement the pool index
+        --poolFiftyIndex;
+    }
+
+    function ForceFiftyLeavePool() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!userFiftyPool[msg.sender]) {
+            revert("Cannot leave Pool if you arent in the pool");
+        }
+        if (userToOpponent[msg.sender] == address(0)) {
+            warToken.gameMint(msg.sender, betsize[msg.sender]);
+        }
+        delete randomNumber[userId[msg.sender]];
+        delete requestUser[userId[msg.sender]];
+        delete betsize[msg.sender];
+        delete userId[msg.sender];
+        delete inGame[msg.sender];
+        leaveFiftyPool(msg.sender);
+    }
+
+    function DrawFifty() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!inGame[msg.sender]) {
+            revert("Must be in a game to draw");
+        }
+        require(
+            poolFiftyIndex >= 2 || opponentToUser[msg.sender] != address(0),
+            "Pool is low. wait for more players to enter"
+        );
+        require(userId[msg.sender] != 0, "User has no unrevealed numbers.");
+        require(
+            (randomNumber[userId[msg.sender]] != uint256(0)),
+            "Random number not ready, try again."
+        );
+        require(
+            card[msg.sender] == 0,
+            "Card has been assigned, reveal to view results"
+        );
+
+        bytes32 requestId = userId[msg.sender];
+        uint256 secretnum = (randomNumber[requestId] % 12) + 1;
+        uint256 opponentNum;
+        address opponent;
+        if (opponentToUser[msg.sender] == address(0)) {
+            opponentNum = (randomNumber[requestId] % (poolFiftyIndex-1)+1);
+            opponent = userFiftyIndex[opponentNum];            
+            if (userFiftyIndex[opponentNum] == msg.sender) {
+                if (opponentNum >= (poolFiftyIndex)) {
+                    --opponentNum;
+                    if (opponentNum == 0) {
+                        revert(
+                            "Pool has emptied while you were drawing. please try to draw again"
+                        );
+                    }
+                } else {
+                    ++opponentNum;
+                }
+            }
+            opponent = userIndex[opponentNum];            
+            userToOpponent[msg.sender] = opponent;
+            opponentToUser[opponent] = msg.sender;
+            userToOpponent[opponent] = msg.sender;
+            opponentToUser[msg.sender] = opponent;
+        }
+        else
+        {
+            opponent = opponentToUser[msg.sender];
+        }
+
+        card[msg.sender] = secretnum;
+        drawTime[msg.sender] = block.timestamp;
+        delete randomNumber[requestId];
+        delete requestUser[requestId];
+        delete userId[msg.sender];
+        if (userFiftyPool[msg.sender]) {            
+            leaveFiftyPool(msg.sender);            
+        }
+        if (userFiftyPool[userToOpponent[msg.sender]]) {
+            leaveFiftyPool(userToOpponent[msg.sender]);
+        }
+    }
+
+    function enterHundredPool(uint256 _amount) public payable nonReentrant {
+        require(!inGame[msg.sender], "Can only enter one pool at a time");
+        require(_amount == 100000000000000000000, "Must bet 100 tokens");
+        require(
+            msg.value >= qfee,
+            "Must small gas fee for the random number generator"
+        );
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        //address payable sendAddress = payable(sponsorWallet);        
+        payable(sponsorWallet).transfer(qfee);
+        userHundredPool[msg.sender] = true;
+        inGame[msg.sender] = true;
+        userHundredIndex[poolHundredIndex+1] = msg.sender;
+        makeRequestUint256(msg.sender);
+        betsize[msg.sender] = _amount;
+
+        warToken.gameBurn(msg.sender, _amount);     
+        emit bet(msg.sender, _amount);
+        emit EnteredPool(msg.sender);
+        ++poolHundredIndex;
+    }
+
+    function leaveHundredPool(address user) internal {
+        require(userHundredPool[user], "Not in any pool");
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        // Find the index of the user in userIndex and delete it
+        uint256 userIndexToDelete;
+        for (uint256 i = 1; i <= poolFiftyIndex; i++) {
+            if (userHundredIndex[i] == user) {
+                userIndexToDelete = i;
+                delete userHundredIndex[i];
+                break;
+            }
+        }
+
+        // Shift all the elements after the deleted index to the left by one position
+        for (uint256 i = userIndexToDelete; i <= poolHundredIndex; i++) {
+            userHundredIndex[i] = userHundredIndex[i + 1];
+        }
+
+        // Delete the last element of userIndex
+        delete userHundredIndex[poolHundredIndex];
+        // Delete the user from userPool
+        delete userHundredPool[user];
+        // Decrement the pool index
+        --poolHundredIndex;
+    }
+
+    function ForceHundredLeavePool() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!userHundredPool[msg.sender]) {
+            revert("Cannot leave Pool if you arent in the pool");
+        }
+        if (userToOpponent[msg.sender] == address(0)) {
+            warToken.gameMint(msg.sender, betsize[msg.sender]);
+        }
+        delete randomNumber[userId[msg.sender]];
+        delete requestUser[userId[msg.sender]];
+        delete betsize[msg.sender];
+        delete userId[msg.sender];
+        delete inGame[msg.sender];
+        leaveHundredPool(msg.sender);
+    }
+
+    function DrawHundred() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!inGame[msg.sender]) {
+            revert("Must be in a game to draw");
+        }
+        require(
+            poolHundredIndex >= 2 || opponentToUser[msg.sender] != address(0),
+            "Pool is low. wait for more players to enter"
+        );
+        require(userId[msg.sender] != 0, "User has no unrevealed numbers.");
+        require(
+            (randomNumber[userId[msg.sender]] != uint256(0)),
+            "Random number not ready, try again."
+        );
+        require(
+            card[msg.sender] == 0,
+            "Card has been assigned, reveal to view results"
+        );
+
+        bytes32 requestId = userId[msg.sender];
+        uint256 secretnum = (randomNumber[requestId] % 12) + 1;
+        uint256 opponentNum;
+        address opponent;
+        if (opponentToUser[msg.sender] == address(0)) {
+            opponentNum = (randomNumber[requestId] % (poolFiftyIndex-1)+1);
+            opponent = userHundredIndex[opponentNum];            
+            if (userHundredIndex[opponentNum] == msg.sender) {
+                if (opponentNum >= (poolFiftyIndex)) {
+                    --opponentNum;
+                    if (opponentNum == 0) {
+                        revert(
+                            "Pool has emptied while you were drawing. please try to draw again"
+                        );
+                    }
+                } else {
+                    ++opponentNum;
+                }
+            }
+            opponent = userHundredIndex[opponentNum];            
+            userToOpponent[msg.sender] = opponent;
+            opponentToUser[opponent] = msg.sender;
+            userToOpponent[opponent] = msg.sender;
+            opponentToUser[msg.sender] = opponent;
+        }
+        else
+        {
+            opponent = opponentToUser[msg.sender];
+        }
+
+        card[msg.sender] = secretnum;
+        drawTime[msg.sender] = block.timestamp;
+        delete randomNumber[requestId];
+        delete requestUser[requestId];
+        delete userId[msg.sender];
+        if (userHundredPool[msg.sender]) {            
+            leaveHundredPool(msg.sender);            
+        }
+        if (userHundredPool[userToOpponent[msg.sender]]) {
+            leaveHundredPool(userToOpponent[msg.sender]);
+        }
+    }
+
+    function enterLargePool(uint256 _amount) public payable nonReentrant {
+        require(!inGame[msg.sender], "Can only enter one pool at a time");
+        require(_amount == 500000000000000000000, "Must bet 100 tokens");
+        require(
+            msg.value >= qfee,
+            "Must small gas fee for the random number generator"
+        );
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        //address payable sendAddress = payable(sponsorWallet);        
+        payable(sponsorWallet).transfer(qfee);
+        userLargePool[msg.sender] = true;
+        inGame[msg.sender] = true;
+        userHundredIndex[poolLargeIndex+1] = msg.sender;
+        makeRequestUint256(msg.sender);
+        betsize[msg.sender] = _amount;
+
+        warToken.gameBurn(msg.sender, _amount);     
+        emit bet(msg.sender, _amount);
+        emit EnteredPool(msg.sender);
+        ++poolLargeIndex;
+    }
+
+    function leaveLargePool(address user) internal {
+        require(userLargePool[user], "Not in any pool");
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        // Find the index of the user in userIndex and delete it
+        uint256 userIndexToDelete;
+        for (uint256 i = 1; i <= poolLargeIndex; i++) {
+            if (userLargeIndex[i] == user) {
+                userIndexToDelete = i;
+                delete userLargeIndex[i];
+                break;
+            }
+        }
+
+        // Shift all the elements after the deleted index to the left by one position
+        for (uint256 i = userIndexToDelete; i <= poolLargeIndex; i++) {
+            userLargeIndex[i] = userLargeIndex[i + 1];
+        }
+
+        // Delete the last element of userIndex
+        delete userLargeIndex[poolLargeIndex];
+        // Delete the user from userPool
+        delete userLargePool[user];
+        // Decrement the pool index
+        --poolLargeIndex;
+    }
+
+    function ForceLargeLeavePool() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!userLargePool[msg.sender]) {
+            revert("Cannot leave Pool if you arent in the pool");
+        }
+        if (userToOpponent[msg.sender] == address(0)) {
+            warToken.gameMint(msg.sender, betsize[msg.sender]);
+        }
+        delete randomNumber[userId[msg.sender]];
+        delete requestUser[userId[msg.sender]];
+        delete betsize[msg.sender];
+        delete userId[msg.sender];
+        delete inGame[msg.sender];
+        leaveLargePool(msg.sender);
+    }
+
+    function DrawLarge() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (!inGame[msg.sender]) {
+            revert("Must be in a game to draw");
+        }
+        require(
+            poolLargeIndex >= 2 || opponentToUser[msg.sender] != address(0),
+            "Pool is low. wait for more players to enter"
+        );
+        require(userId[msg.sender] != 0, "User has no unrevealed numbers.");
+        require(
+            (randomNumber[userId[msg.sender]] != uint256(0)),
+            "Random number not ready, try again."
+        );
+        require(
+            card[msg.sender] == 0,
+            "Card has been assigned, reveal to view results"
+        );
+
+        bytes32 requestId = userId[msg.sender];
+        uint256 secretnum = (randomNumber[requestId] % 12) + 1;
+        uint256 opponentNum;
+        address opponent;
+        if (opponentToUser[msg.sender] == address(0)) {
+            opponentNum = (randomNumber[requestId] % (poolLargeIndex-1)+1);
+            opponent = userHundredIndex[opponentNum];            
+            if (userLargeIndex[opponentNum] == msg.sender) {
+                if (opponentNum >= (poolLargeIndex)) {
+                    --opponentNum;
+                    if (opponentNum == 0) {
+                        revert(
+                            "Pool has emptied while you were drawing. please try to draw again"
+                        );
+                    }
+                } else {
+                    ++opponentNum;
+                }
+            }
+            opponent = userLargeIndex[opponentNum];            
+            userToOpponent[msg.sender] = opponent;
+            opponentToUser[opponent] = msg.sender;
+            userToOpponent[opponent] = msg.sender;
+            opponentToUser[msg.sender] = opponent;
+        }
+        else
+        {
+            opponent = opponentToUser[msg.sender];
+        }
+
+        card[msg.sender] = secretnum;
+        drawTime[msg.sender] = block.timestamp;
+        delete randomNumber[requestId];
+        delete requestUser[requestId];
+        delete userId[msg.sender];
+        if (userLargePool[msg.sender]) {            
+            leaveLargePool(msg.sender);            
+        }
+        if (userLargePool[userToOpponent[msg.sender]]) {
+            leaveLargePool(userToOpponent[msg.sender]);
+        }
+    }
+
+    function OpponentIssue() public nonReentrant {
+        if (!gameActive) {
+            revert("Game has been temporarily Paused");
+        }
+        if (card[msg.sender] != 0 && userToOpponent[msg.sender] != address(0)) {
+            revert("Opponent is selected. wait for reveal");
+        }
+        if (!inGame[msg.sender]) {
+            revert("Must be in game");
+        }
+        if (userPool[msg.sender] || userFiftyPool[msg.sender]) {
+            revert("Use Force Leave pool function to leave the pool");
+        }
+        warToken.gameMint(msg.sender, betsize[msg.sender]);
+        delete randomNumber[userId[msg.sender]];
+        delete requestUser[userId[msg.sender]];
+        delete betsize[msg.sender];
+        delete userId[msg.sender];
+        delete card[msg.sender];
+        delete drawTime[msg.sender];
+        delete inGame[msg.sender];
     }
 
     function Reveal() public nonReentrant {
@@ -379,9 +798,15 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         delete inGame[opponent];
         delete userPool[opponent];
         delete userPool[msg.sender];
+        delete userFiftyPool[opponent];
+        delete userFiftyPool[msg.sender];
+        delete userHundredPool[opponent];
+        delete userHundredPool[msg.sender];
+        delete userLargePool[opponent];
+        delete userLargePool[msg.sender];
     }
 
-    function ForceWin() public nonReentrant {
+    function ForceWin() public {
         if (!gameActive) {
             revert("Game has been temporarily Paused");
         }
@@ -403,12 +828,19 @@ contract WARGAME is Ownable, ReentrancyGuard, RrpRequesterV0 {
         bytes32 oppRequestId = userId[opponent];
 
         warToken.gameMint(msg.sender, totalBet);
+
         delete randomNumber[oppRequestId];
         delete requestUser[oppRequestId];
         delete userId[msg.sender];
         delete userId[opponent];
         delete userPool[opponent];
         delete userPool[msg.sender];
+        delete userFiftyPool[opponent];
+        delete userFiftyPool[msg.sender];
+        delete userHundredPool[opponent];
+        delete userHundredPool[msg.sender];
+        delete userLargePool[opponent];
+        delete userLargePool[msg.sender];
         delete userToOpponent[msg.sender];
         delete opponentToUser[msg.sender];
         delete userToOpponent[opponent];
